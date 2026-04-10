@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🛡️ NexusGuard
 ### External Identity Governance Platform
 *"Identity Governance for the World Beyond Your Firewall"*
@@ -233,3 +234,7 @@ See [docs/POSITIONING_AND_INTERVIEW_GUIDE.md](docs/POSITIONING_AND_INTERVIEW_GUI
 
 ## License
 MIT — Use freely for portfolio, demonstration, and production.
+
+# nexusguard
+NexusGuard is a production-grade **External Identity Governance (xIGA)** platform — the missing layer between CIAM authentication tools (Okta, Entra, Ping) and enterprise IGA platforms (SailPoint, Saviynt) for governing **vendors, partners, contractors, and B2B customers**.
+>>>>>>> 1a1abc58eff43ed1a569cf4b92714cc052ab98a6
