@@ -11,6 +11,7 @@ from app.core.security import get_current_user, CurrentUser
 from app.services.risk_engine import RiskScoringEngine
 from app.models.models import User, RiskScore, RiskTier
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 router = APIRouter()
 
@@ -59,6 +60,7 @@ async def get_high_risk_users(
     """Get all users with high or critical risk scores."""
     result = await db.execute(
         select(User)
+        .options(selectinload(User.org))
         .where(User.risk_tier.in_([RiskTier.high, RiskTier.critical]))
         .where(User.status == "active")
         .order_by(User.current_risk_score.desc())
@@ -69,7 +71,7 @@ async def get_high_risk_users(
             "id": str(u.id),
             "email": u.email,
             "name": f"{u.first_name} {u.last_name}",
-            "organization": u.organization,
+            "organization_name": u.org_name,
             "risk_score": float(u.current_risk_score),
             "risk_tier": u.risk_tier.value,
             "identity_class": u.identity_class.value,

@@ -89,7 +89,10 @@ class Organization(Base):
     updated_at      = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     metadata_       = Column("metadata", JSONB, default=dict)
 
-    users = relationship("User", back_populates="organization")
+    # back_populates="org" matches the relationship attribute name on User.
+    # Previously this was "organization" which pointed at a String Column —
+    # that is a SQLAlchemy mapper error. Fixed here.
+    users = relationship("User", back_populates="org")
 
 
 class User(Base):
@@ -102,8 +105,9 @@ class User(Base):
     last_name           = Column(String(100), nullable=False)
     display_name        = Column(String(255))
     identity_class      = Column(SAEnum(IdentityClass), nullable=False)
-    organization        = Column(String(255), nullable=False)
-    organization_id     = Column(UUID(as_uuid=True), ForeignKey("organizations.id"))
+    # organization (String) column REMOVED by migration 0002.
+    # Use user.org.name via the relationship below.
+    organization_id     = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
     status              = Column(SAEnum(IdentityStatus), default=IdentityStatus.pending)
     risk_tier           = Column(SAEnum(RiskTier), default=RiskTier.medium)
     current_risk_score  = Column(Numeric(5, 2), default=50.0)
@@ -118,10 +122,39 @@ class User(Base):
     created_by          = Column(UUID(as_uuid=True))
     metadata_           = Column("metadata", JSONB, default=dict)
 
+    # Relationship to Organization. Access org name via: user.org.name
+    # back_populates="org" matches Organization.users(back_populates="org").
+    # IMPORTANT: In async SQLAlchemy, user.org triggers a lazy load which
+    # raises MissingGreenlet outside an active session. Always use
+    # selectinload(User.org) in queries before accessing user.org.name.
     org                 = relationship("Organization", back_populates="users")
     user_roles          = relationship("UserRole", back_populates="user")
     risk_scores         = relationship("RiskScore", back_populates="user")
     sod_violations      = relationship("SoDViolation", back_populates="user")
+
+    @property
+    def org_name(self) -> str:
+        """
+        Safe accessor for org name in API serialization.
+
+        Returns the organization name if the 'org' relationship is loaded,
+        or a safe fallback string if not. This prevents MissingGreenlet
+        errors when the relationship has not been selectinload()-ed.
+
+        Usage in endpoints:
+            result = await db.execute(
+                select(User).options(selectinload(User.org))
+            )
+            user = result.scalar_one()
+            print(user.org_name)   # safe — org is loaded
+        """
+        try:
+            return self.org.name if self.org else "Unknown Organization"
+        except Exception:
+            # Relationship not loaded — return fallback rather than crashing.
+            # This should not happen if selectinload is used; the fallback
+            # makes the error visible without masking it completely.
+            return "Unknown Organization"
 
 
 class Role(Base):

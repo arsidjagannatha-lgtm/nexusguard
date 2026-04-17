@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import get_current_user, CurrentUser
@@ -150,6 +151,7 @@ async def get_risk_heatmap(
     """Risk score data for heatmap visualization."""
     result = await db.execute(
         select(User)
+        .options(selectinload(User.org))
         .where(User.status == IdentityStatus.active)
         .order_by(User.current_risk_score.desc())
         .limit(50)
@@ -160,7 +162,7 @@ async def get_risk_heatmap(
             "id": str(u.id),
             "name": f"{u.first_name} {u.last_name}",
             "email": u.email,
-            "organization": u.organization,
+            "organization_name": u.org_name,
             "identity_class": u.identity_class.value,
             "risk_score": float(u.current_risk_score),
             "risk_tier": u.risk_tier.value,

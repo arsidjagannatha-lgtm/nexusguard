@@ -12,7 +12,12 @@ services:
       POSTGRES_PASSWORD: nexuspass
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      # schema.sql bootstrapping is DISABLED — Alembic now owns the schema.
+      # Fresh deployments: docker-compose up postgres, then run:
+      #   cd backend && alembic upgrade head
+      # Existing DB (already created from schema.sql):
+      #   cd backend && alembic stamp 0001
+      # - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
     ports:
       - "5432:5432"
     healthcheck:

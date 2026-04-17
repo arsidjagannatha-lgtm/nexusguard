@@ -7,10 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import get_current_user, CurrentUser
-from app.models.models import User, IdentityClass, IdentityStatus, RiskTier
+from app.models.models import User, Organization, IdentityClass, IdentityStatus, RiskTier
 from app.services.audit_service import AuditService
 from app.models.models import AuditCategory
 
@@ -24,8 +25,10 @@ class UserCreate(BaseModel):
     first_name: str
     last_name: str
     identity_class: IdentityClass
-    organization: str
-    organization_id: Optional[UUID] = None
+    # organization_id is now REQUIRED — the FK is the source of truth.
+    # The old 'organization: str' field has been removed. Callers must pass a
+    # valid organizations.id. Use GET /api/v1/organizations to look up IDs.
+    organization_id: UUID
     source_system: Optional[str] = "manual"
     contract_id: Optional[str] = None
     contract_expires_at: Optional[datetime] = None
@@ -39,7 +42,10 @@ class UserResponse(BaseModel):
     last_name: str
     display_name: Optional[str]
     identity_class: str
-    organization: str
+    # organization_id is the FK; org_name is the human-readable name derived
+    # from the loaded relationship. Both are included for API consumers.
+    organization_id: UUID
+    org_name: str
     status: str
     risk_tier: str
     current_risk_score: float
@@ -65,7 +71,17 @@ async def create_user(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Onboard a new external identity."""
-    # Check for duplicate
+    # Validate the organization exists before creating the user.
+    # This gives a clear 404 instead of a cryptic FK constraint violation.
+    org = await db.get(Organization, data.organization_id)
+    if not org:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Organization {data.organization_id} not found. "
+                   "Create the organization first or use GET /api/v1/organizations."
+        )
+
+    # Check for duplicate email
     existing = await db.execute(select(User).where(User.email == data.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="User with this email already exists")
@@ -76,7 +92,6 @@ async def create_user(
         last_name=data.last_name,
         display_name=f"{data.first_name} {data.last_name}",
         identity_class=data.identity_class,
-        organization=data.organization,
         organization_id=data.organization_id,
         status=IdentityStatus.active,
         source_system=data.source_system,
@@ -90,7 +105,7 @@ async def create_user(
     db.add(user)
     await db.flush()
 
-    # Audit
+    # Audit — org name comes from the already-loaded org object (not the dropped String)
     audit = AuditService(db)
     await audit.log(
         category=AuditCategory.identity_lifecycle,
@@ -103,12 +118,25 @@ async def create_user(
         target_email=user.email,
         resource_type="user",
         resource_id=str(user.id),
-        payload={"identity_class": data.identity_class.value, "organization": data.organization},
+        payload={
+            "identity_class": data.identity_class.value,
+            "organization_id": str(data.organization_id),
+            "organization_name": org.name,
+        },
         new_state={"status": "active", "risk_tier": "medium"},
     )
 
     await db.commit()
-    return user
+
+    # Reload with relationship so org_name property works in the response.
+    # db.get() after commit returns a potentially stale instance — refresh
+    # and eager-load the org relationship explicitly.
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.org))
+        .where(User.id == user.id)
+    )
+    return result.scalar_one()
 
 
 @router.get("/", response_model=List[UserResponse])
@@ -123,7 +151,10 @@ async def list_users(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """List external identities with filtering."""
-    query = select(User)
+    # selectinload(User.org) — loads Organization in a second query (not JOIN).
+    # This avoids a cartesian product when multiple relationships are loaded,
+    # and is the recommended pattern for list endpoints in async SQLAlchemy.
+    query = select(User).options(selectinload(User.org))
     if status:
         query = query.where(User.status == status)
     if identity_class:
@@ -131,11 +162,17 @@ async def list_users(
     if risk_tier:
         query = query.where(User.risk_tier == risk_tier)
     if search:
-        query = query.where(
-            (User.email.ilike(f"%{search}%")) |
-            (User.first_name.ilike(f"%{search}%")) |
-            (User.last_name.ilike(f"%{search}%")) |
-            (User.organization.ilike(f"%{search}%"))
+        # Search by org name now requires a JOIN since the String column is gone.
+        # We join organizations and search on organizations.name.
+        query = (
+            query
+            .join(Organization, User.organization_id == Organization.id)
+            .where(
+                (User.email.ilike(f"%{search}%")) |
+                (User.first_name.ilike(f"%{search}%")) |
+                (User.last_name.ilike(f"%{search}%")) |
+                (Organization.name.ilike(f"%{search}%"))
+            )
         )
     query = query.order_by(User.current_risk_score.desc()).limit(limit).offset(offset)
     result = await db.execute(query)
@@ -148,7 +185,13 @@ async def get_user(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    user = await db.get(User, user_id)
+    # db.get() does NOT load relationships. Use select + selectinload instead.
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.org))
+        .where(User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -244,7 +287,12 @@ async def get_user_summary(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Full identity summary: user + roles + risk + SoD violations."""
-    user = await db.get(User, user_id)
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.org))
+        .where(User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -270,7 +318,8 @@ async def get_user_summary(
             "email": user.email,
             "name": user.display_name or f"{user.first_name} {user.last_name}",
             "identity_class": user.identity_class.value,
-            "organization": user.organization,
+            "organization_id": str(user.organization_id),
+            "organization_name": user.org_name,
             "status": user.status.value,
             "risk_score": float(user.current_risk_score),
             "risk_tier": user.risk_tier.value,
